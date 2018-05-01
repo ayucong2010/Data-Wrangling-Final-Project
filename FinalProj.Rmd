@@ -1,0 +1,519 @@
+---
+title: "FinalProj"
+author: "Cong Yu"
+date: "4/19/2018"
+output: html_document:
+  code_folding: hide
+
+---
+
+* loading and exploying data
+* individual feature analysis
+    +
+    +
+* Data Cleaning
+
+* Features relation
+    +
+    +
+* build new features
+
+* external datasets
+    + weather impact
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r, message = FALSE}
+library('ggplot2') # visualisation
+library('scales') # visualisation
+library('grid') # visualisation
+library('RColorBrewer') # visualisation
+library('corrplot') # visualisation
+library('alluvial') # visualisation
+library('dplyr') # data manipulation
+library('readr') # input/output
+library('data.table') # data manipulation
+library('tibble') # data wrangling
+library('tidyr') # data wrangling
+library('stringr') # string manipulation
+library('forcats') # factor manipulation
+library('lubridate') # date and time
+library('geosphere') # geospatial locations
+library('leaflet') # maps
+library('leaflet.extras') # maps
+library('maps') # maps
+library('xgboost') # modelling
+library('caret') # modelling
+library(ggthemes)
+library(knitr)
+library(scales)
+library(ggmap)
+library(RColorBrewer)
+library(treemap)
+# gis packages
+library(sp)
+library(rgeos)
+library(geosphere)
+
+```
+## Data loading
+```{r warning=FALSE, results=FALSE}
+train <- as.tibble(fread('train.csv'))
+test <- as.tibble(fread('test.csv'))
+full <- bind_rows(train %>% mutate(dset = "train"), 
+                     test %>% mutate(dset = "test",
+                                     dropoff_datetime = NA,
+                                     trip_duration = NA))
+```
+
+## Data Exploying
+```{r}
+summary(train)
+glimpse(train)
+glimpse(test)
+```
+
+
+## Features summary
+
+- 'vender id' has values 1 and 2, represents two differernt taxi companies in NYC. We should treat it as a factor.  
+
+- 'pickup datetime' is in both train and test dataset, 'dropoff datetime' only in train dataset.  
+
+-'passenger count', number of passengers, has values from 0 to 9. We should treat it as a factor  
+
+-'pickup longtitude&latitude' are in both train and test dataset, 'dropoff longtitude&latitude' only in train set.  
+
+-'store and fwd flag', 'N' means trip data was sent immediately to server. 'Y' means trip data was held in the memory there was no connection to server.  
+
+-'trip duration' is only in train dataset.  
+
+## individual feature analysis
+```{r}
+# take a look at trip duration 
+
+# rect <- data.frame(xmin=1e+04, xmax=1e+05, ymin=-Inf, ymax=Inf) 
+#fail to put two rectangles on outliers
+ggplot(data = train, aes(x = trip_duration))+
+  geom_histogram(bins = 100, color = "green")+
+  geom_vline(xintercept = 10, linetype = "dashed", color = "red", size = 1) +
+  geom_vline(xintercept = 3600*22, linetype = "dashed", color = "red", size = 1) + 
+  scale_x_log10()+
+  scale_y_sqrt()
+
+
+```
+
+- it's generally normal distributed  
+
+- strange values that should be removed s.t. less than 10 sec trips and longer than 22 hours trips   
+
+
+```{r}
+par(mfrow=c(1,1))
+# take a  look at passenger count
+ggplot(data = train, mapping = aes(x = passenger_count))+
+  geom_bar( fill  = "blue")
+#exact counts
+table(train$passenger_count)
+# mean and median of passenger count
+boxplot(train$passenger_count,col ="pink", ylab = "passenger_count", main= "passenger_count,mean(magenta),median(red)")
+abline(h = mean(train$passenger_count),col= "magenta")
+abline(h = median(train$passenger_count, col = "red", lwd = 2))
+```
+
+- the majority of passenger number is 1, some 0 and over 8 passengers clearly not reasonable and should be removed.  
+
+
+```{r}
+# two different taxi companies
+ggplot(data = train, mapping =aes(x = vendor_id ) )+
+  geom_bar()
+# exact counts
+table(train$vendor_id)
+```
+
+- we can see vendor 2 has more trips than vendor 1, I guess it owns more taxis.  
+
+```{r}
+# store and fwd flag
+ggplot(data = train, mapping =aes(x = store_and_fwd_flag ) )+
+  geom_bar()
+# exact numbers
+table(train$store_and_fwd_flag)
+
+```
+- majority of trips sent data imeediately.
+
+```{r}
+#pickup and dropoff datetime
+#datetime formate transform
+train$pickup_datetime = ymd_hms(train$pickup_datetime)
+train$dropoff_datetime = ymd_hms(train$dropoff_datetime)
+train$month<- lubridate::month(train$pickup_datetime, label = TRUE) 
+train$wday <- lubridate::wday (train$pickup_datetime, label = TRUE)
+train$hour <- lubridate::hour(train$pickup_datetime)
+train$date <- lubridate::day(train$pickup_datetime)
+train$minutes <-lubridate:: minute(train$pickup_datetime)
+#pickup
+ggplot(data = train, mapping =aes(x = pickup_datetime ) )+
+   geom_histogram(fill = "blue", bins = 120)
+#dropoff
+ggplot(data = train, mapping =aes(x = dropoff_datetime ) )+
+geom_histogram(fill = "blue", bins = 120)
+# by month
+ggplot(data = train, mapping =aes(x = month ) )+
+  geom_bar(fill = "green")
+
+# by days of a week
+ggplot(data = train, mapping =aes(x = wday ) )+
+  geom_bar(fill = "green")
+# by date
+ggplot(data = train, mapping =aes(x = date ) )+
+  geom_bar(fill = "blue")
+# by hour
+ggplot(data = train, mapping =aes(x = hour ) )+
+  geom_bar(fill = "blue")
+```
+- the pickups and dropoffs are nearly identical since the trips are likely start and end on same day.  
+
+- through the year, March and April have slightly more trips than other months.  
+
+- through the week, Monday to Friday have trips than increased linearly, then Saturday starts to decrease.  
+
+- through the month, the last five days tend to have less trips.  
+
+- through the day, clearly least trips from midnight to 6 A.M. The peaks are around 6 P.M.  
+
+```{r, warning=FALSE}
+#long and lat visualization in NYC
+min_lat <- 40.6
+max_lat <- 40.9
+min_long <- -74.05
+max_long <- -73.7
+
+ggplot(train, aes(x=pickup_longitude, y=pickup_latitude)) +
+geom_jitter(size=0.6, color = "white") +
+scale_x_continuous(limits=c(min_long, max_long)) +
+scale_y_continuous(limits=c(min_lat, max_lat))+
+theme_dark()
+# passenger > 5
+ggplot(train %>% 
+         filter(passenger_count>5), 
+         aes(x=pickup_longitude, y=pickup_latitude,  color=vendor_id)) +
+         geom_point(size=0.6, color="#999999") +
+         stat_summary_hex(fun = sum, bins=100, alpha=0.7) +
+         scale_x_continuous(limits=c(min_long, max_long)) +
+         scale_y_continuous(limits=c(min_lat, max_lat)) +
+         theme_dark() +
+         scale_fill_gradient(low="#CCCCCC", high="#27AE60", labels=seconds) +
+         labs(title = "Pickup locations for passenger more than 5") +
+         coord_equal()
+```
+
+
+- We can see majority trips took place in NYC Center Area. Trips with more than 5 passengers distributed evenly in town.   
+
+
+
+```{r}
+#check data points that are fake: not in NYC area
+
+#load map data
+state <- map_data("state")
+nyc <- state %>% filter(region=="new york")
+county <- map_data("county")
+nyc_county <- county %>% filter(region=="new york")
+
+set <- rbind(
+  train %>% dplyr::select(pickup_longitude, pickup_latitude) %>% mutate(set="tr"),
+  test %>% dplyr::select(pickup_longitude, pickup_latitude) %>% mutate(set="te"))
+
+
+#we can check some coords are outside the United States as well as NYC
+
+#filter coords outside NYC 
+out <- train %>%
+  filter((pickup_longitude > max(nyc$long) | pickup_longitude < min(nyc$long)) | (pickup_latitude > max(nyc$lat) | pickup_latitude < min(nyc$lat)))
+
+#See those coords in details with real map 
+leaflet(data=out, width="100%") %>%
+  addTiles() %>%
+  addMarkers(~pickup_longitude, ~pickup_latitude, popup=as.character(out$id))
+
+
+```
+
+- Now we get those couple "fake" data points and they will be removed later in data cleaning.  
+
+
+## feature relation
+
+```{r}
+#vender id vs others
+#month vs vender id
+train %>%
+ggplot( aes(x = month, fill = as.factor(vendor_id)))+
+  geom_bar(position ="dodge")+
+  labs(y = "count", x = "Months")
+# days of a week vs vender id
+train %>%
+ggplot(aes(x = wday, fill = as.factor(vendor_id)))+
+geom_bar(position ="dodge")+
+labs(y = "Total number of pickups", x = "Days of the week")
+# hours of a day vs vender id
+train %>%
+ggplot(aes(x = hour, fill = as.factor(vendor_id)))+
+geom_bar()+
+labs(y = "Total number of pickups", x = "Hours")
+# trip duation vs vender id
+train %>%
+  ggplot(aes(trip_duration, fill =  as.factor(vendor_id))) +
+  geom_density(position = "stack") +
+  scale_x_log10()
+```
+
+- each of the vender has trips distribute similarly to overall trips,  
+regarding to month, days of a week, hours in a day.   
+
+- vendor 1 has most of it's trips last about 15-17 mins.  
+
+```{r}
+#hours of a day vs others
+#hours of a day vs month
+train %>%
+ggplot(aes(x = hour,fill = month))+
+  geom_bar(position = "dodge")+
+  facet_grid(~month, scales = "free")+
+  scale_fill_manual(labels= levels(month), values=c("red","blue","green","brown","pink","magenta"))+ 
+  labs(y = "Total number of pickups", x = "Hours")
+#hours of a day vs days of a week
+train %>%
+ggplot(aes(x = hour,color= wday))+
+  geom_bar(position = "dodge")+
+  facet_grid(~wday, scales = "free")+
+  scale_fill_manual(labels= c("sun","mon","tue","wed","Thur","fri","sat"),values=c("red","blue","green","brown","pink","magenta","yellow"))+ 
+  labs(y = "Total number of pickups", x = "Hours")
+#hours of a day vs minuetes in an hour
+train %>%
+ggplot(aes(x = minutes,fill=as.factor(hour)))+
+  geom_bar(position = "dodge")+
+  facet_grid(~ hour, scales = "free")+
+  labs(y = "Total number of pickups", x = "Minutes")
+```
+
+- In these plots we can see hourly distribution in each day of a week/ each month,  
+or hourly distribution detailed in minutes.  
+
+- not much different patterns compare to previous plots.  
+
+- We can find from Monday to Sunday, the peaks are moving from early night to late night.
+
+#build new features
+```{r}
+#direct distance for a trip
+pick_coord <- train %>%
+  dplyr::select(pickup_longitude, pickup_latitude)
+drop_coord <- train %>%
+  dplyr::select(dropoff_longitude, dropoff_latitude)
+train <- train %>%
+  mutate(dist = distCosine(pick_coord, drop_coord))
+
+
+train %>%
+  ggplot(aes(dist, trip_duration)) +
+  geom_point() +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "Direct distance [m]", y = "Trip duration [s]")
+
+# after excluding extreme
+train %>%
+  filter(trip_duration < 3600 & trip_duration > 120) %>%
+  filter(dist > 100 & dist < 100e3) %>%
+  ggplot(aes(dist, trip_duration)) +
+  geom_bin2d(bins = c(500,500)) +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "Direct distance [m]", y = "Trip duration [s]")
+```
+
+- It is reasonable that duation of a trip has positive linear relationship with direct distance.  
+
+
+```{r}
+# speed in a trip 
+train <- train %>%
+  mutate(speed = dist/trip_duration*3.6)
+train %>%
+  filter(speed > 2 & speed < 1e2) %>%
+  ggplot(aes(speed)) +
+  geom_histogram(fill = "red", bins = 50) +
+  labs(x = "Average speed ")
+
+train %>%
+  group_by(wday, vendor_id) %>%
+  summarise(median_speed = median(speed)) %>%
+  ggplot(aes(wday, median_speed, color = vendor_id)) +
+  geom_point(size = 4) +
+  labs(x = "Day of the week", y = "Median speed [km/h]")
+
+train %>%
+  group_by(hour, vendor_id) %>%
+  summarise(median_speed = median(speed)) %>%
+  ggplot(aes(hour, median_speed, color = vendor_id)) +
+  geom_smooth(method = "loess", span = 1/2) +
+  geom_point(size = 4) +
+  labs(x = "Hour of the day", y = "Median speed [km/h]") +
+  theme(legend.position = "none")
+
+train %>%
+  group_by(wday, hour) %>%
+  summarise(median_speed = median(speed)) %>%
+  ggplot(aes(hour, wday, fill = median_speed)) +
+  geom_tile() +
+  labs(x = "Hour of the day", y = "Day of the week") +
+  scale_fill_distiller(palette = "Spectral")
+
+
+```
+
+- Since the distance used to calculate speed is direct distance from two points,  
+the average speed is clearly under estimated. But it's reasonable for trips in NYC to be relatively slower than other places.  
+
+- It is interesting that taxis go slower from Sunday to Thursday then start to be faster.  
+
+- It's an easy guess that speed will be the fastest around 5 since there will be least traffic in a day.   
+
+- In heatmap each day in a week has its fastest speed around 5 a.m.  
+
+
+```{r}
+#direction
+train$bearing = bearing(pick_coord, drop_coord)
+
+train %>%
+  filter(dist < 1e5) %>%
+  ggplot(aes(bearing, dist)) +
+  geom_bin2d(bins = c(100,100)) +
+  labs(x = "Bearing", y = "Direct distance") +
+  scale_y_log10() +
+  theme(legend.position = "none") +
+  coord_polar() +
+  scale_x_continuous(breaks = seq(-180, 180, by = 45))
+
+train %>%
+  filter(trip_duration < 3600*22) %>%
+  filter(dist < 1e5) %>%
+  ggplot(aes(bearing, trip_duration)) +
+  geom_bin2d(bins = c(100,100)) +
+  scale_y_log10() +
+  labs(x = "Bearing", y = "Trip duration") +
+  coord_polar() +
+  scale_x_continuous(breaks = seq(-180, 180, by = 45))
+
+train %>%
+  filter(speed < 75 & dist < 1e5) %>%
+  ggplot(aes(bearing, speed)) +
+  geom_bin2d(bins = c(100,100)) +
+  labs(x = "Bearing", y = "Speed") +
+  coord_polar() +
+  scale_x_continuous(breaks = seq(-180, 180, by = 45))
+
+
+
+```
+
+
+
+
+
+#DATA CLEANING
+```{r}
+#remove coords outside NYC
+# wired trips with duration < 10 sec or > 22 hours
+
+train <- train %>%
+  filter(!id %in% out$id,
+         trip_duration < 22*3600,
+         trip_duration > 10,
+         dist > 0 | (near(dist, 0) & trip_duration < 60),
+         speed < 100)
+```
+
+#external datasets
+```{r}
+weather <- as.tibble(fread("/Users/yucong/Downloads/datawrangling/FinalProject/weather_data_nyc_centralpark_2016(1).csv"))
+# Reformating and cleaning weather dataset
+weather <- weather %>%
+  mutate(date1 = dmy(date),
+         rain = as.numeric(ifelse(precipitation == "T", "0.01", precipitation)),
+         s_fall = as.numeric(ifelse(`snow fall` == "T", "0.01", `snow fall`)),
+         s_depth = as.numeric(ifelse(`snow depth` == "T", "0.01", `snow depth`)),
+         all_precip = s_fall + rain,
+         has_snow = (s_fall > 0) | (s_depth > 0),
+         has_rain = rain > 0,
+         max_temp = `maximum temperature`,
+         min_temp = `minimum temperature`)
+add_Info <- weather %>%
+  select(date1, rain, s_fall, all_precip, has_snow, has_rain, s_depth, max_temp, min_temp)
+train <- train %>%
+  mutate(date1 = date(pickup_datetime))
+
+train <- left_join(train, add_Info, by = "date1")
+
+
+train %>%
+  group_by(date1) %>%
+  summarise(trips = n(),
+            snow_fall = mean(s_fall),
+            rain_fall = mean(rain),
+            all_precip = mean(all_precip)) %>%
+  ggplot(aes(date1, snow_fall)) +
+  geom_line(color = "blue", size = 1.5) +
+  labs(x = "", y = "Snowfall") +
+  scale_y_sqrt() +
+  scale_x_date(limits = ymd(c("2015-12-28", "2016-06-30")))
+
+train %>%
+  group_by(date1) %>%
+  summarise(trips = n(),
+            snow_depth = mean(s_depth)) %>%
+  ggplot(aes(date1, snow_depth)) +
+  geom_line(color = "purple", size = 1.5) +
+  labs(x = "", y = "Snow depth") +
+  scale_y_sqrt() +
+  scale_x_date(limits = ymd(c("2015-12-29", "2016-06-30")))
+
+ggplot(data = train, mapping =aes(x = pickup_datetime ) )+
+   geom_histogram(fill = "blue", bins = 120)
+
+train %>%
+  group_by(date1) %>%
+  summarise(median_speed = median(speed)) %>%
+  ggplot(aes(date1, median_speed)) +
+  geom_line(color = "orange", size = 1.5) +
+  labs(x = "Date", y = "Median speed")
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
